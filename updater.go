@@ -45,6 +45,10 @@ func (u *Updater) RestartAndUpdate() error {
 		return err
 	}
 
+	if err = os.Rename(u.execPath+".new", u.execPath); err != nil {
+		return err
+	}
+
 	_, err = os.StartProcess(u.execPath, os.Args, &os.ProcAttr{
 		Dir:   filepath.Dir(u.execPath),
 		Env:   os.Environ(),
@@ -120,7 +124,7 @@ func (u *Updater) fetch() (string, error) {
 // <execPath>.new, and returns the metadata about the binary file
 func (u *Updater) unpack(path string) (Info, error) {
 	var info Info
-	var binaryFile, infoFile io.ReadCloser
+	var binaryFile, infoFile *zip.File
 
 	r, err := zip.OpenReader(path)
 	if err != nil {
@@ -129,17 +133,12 @@ func (u *Updater) unpack(path string) (Info, error) {
 	defer r.Close()
 
 	for _, f := range r.File {
-		rc, err := f.Open()
-		if err != nil {
-			return info, err
-		}
-
 		// TODO! probably a better way than hardcoded
 		switch f.Name {
 		case "info.json":
-			infoFile = rc
-		case u.execPath:
-			binaryFile = rc
+			infoFile = f
+		case filepath.Base(u.execPath):
+			binaryFile = f
 		}
 	}
 
@@ -147,13 +146,22 @@ func (u *Updater) unpack(path string) (Info, error) {
 		return info, errors.New("info.json or binary file doesn't exist in archive")
 	}
 
-	defer infoFile.Close()
-	defer binaryFile.Close()
-
-	// Parse info.json
-	if err = json.NewDecoder(infoFile).Decode(&info); err != nil {
+	rc, err := infoFile.Open()
+	if err != nil {
 		return info, err
 	}
+	defer rc.Close()
+
+	// Parse info.json
+	if err = json.NewDecoder(rc).Decode(&info); err != nil {
+		return info, err
+	}
+
+	rc, err = binaryFile.Open()
+	if err != nil {
+		return info, err
+	}
+	defer rc.Close()
 
 	newFile, err := os.Create(u.execPath + ".new")
 	if err != nil {
@@ -161,6 +169,10 @@ func (u *Updater) unpack(path string) (Info, error) {
 	}
 	defer newFile.Close()
 
-	_, err = io.Copy(newFile, binaryFile)
+	if err = newFile.Chmod(binaryFile.Mode()); err != nil {
+		return info, err
+	}
+
+	_, err = io.Copy(newFile, rc)
 	return info, err
 }
